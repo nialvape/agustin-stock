@@ -6,22 +6,54 @@ Sistema de gestión de stock para tiendas de accesorios de celulares.
 
 ```
 agustin-stock/
-├── config/
-│   └── config.xlsx          # Configuración central
-├── tables/
-│   ├── ACCESORIOS_LA_PLATA_13-04.xlsx  # Stock actual (fuente)
-│   ├── GLASS_LA_PLATA_13-04.xlsx        # Stock actual (fuente)
-│   ├── WANTED_ACCESORIOS_LA_PLATA.xlsx  # Diferencia calculada
-│   ├── WANTED_GLASS_LA_PLATA.xlsx
-│   └── ORDER_ACCESORIOS_LA_PLATA_{PROVIDER}.xlsx  # Órdenes por proveedor
-└── generate_order.py        # Script principal
+├── src/
+│   ├── __init__.py
+│   ├── google_sheets.py      # Autenticación y helpers de Google Sheets
+│   └── sheet_config.py   # Configuración de sheets y tabs
+├── .env                 # Variables de entorno (IDs de spreadsheets)
+├── credentials.json    # Credenciales de Google Service Account
+├── generate_order.py   # Script principal
+└── README.md
 ```
 
-## Configuración (`config/config.xlsx`)
+## Configuración
+
+### 1. Google Sheets
+
+Cada variable en `.env` corresponde a un spreadsheet ID de Google Sheets:
+
+```env
+GLASS_TABLE=spreadsheet_id
+ACCESORIOS_TABLE=spreadsheet_id
+WANTED_GLASS_TABLE=spreadsheet_id
+WANTED_ACCESORIOS_TABLE=spreadsheet_id
+ORDER_GLASS_TABLE=spreadsheet_id
+ORDER_ACCESORIOS_TABLE=spreadsheet_id
+CONFIG_TABLE=spreadsheet_id
+GOOGLE_APPLICATION_CREDENTIALS=./credentials.json
+```
+
+### 2. Service Account
+
+1. Crear proyecto en [Google Cloud Console](https://console.cloud.google.com)
+2. Habilitar **Google Sheets API**
+3. Crear **Service Account** en IAM & Admin
+4. Descargar JSON de credenciales
+5. Compartir cada spreadsheet con el email del service account
+
+### 3. Estructura de Sheets
+
+| Spreadsheet | Tabs |
+|------------|------|
+| `GLASS_TABLE` | PANTALLA, CAMARAS, RELOJES-AIRPODS |
+| `ACCESORIOS_TABLE` | ACCESORIOS |
+| `WANTED_GLASS_TABLE` | STOCK |
+| `WANTED_ACCESORIOS_TABLE` | STOCK |
+| `ORDER_GLASS_TABLE` | COTO, MONTE, BELLA, PILAR, VELEZ, MERLO, SANFER, LA PLATA, GLEW, SAN MARTIN, ZARATE |
+| `ORDER_ACCESORIOS_TABLE` | ACCE |
+| `CONFIG_TABLE` | providers, product_mapping |
 
 ### Sheet: `providers`
-Lista de proveedores.
-
 | provider | code |
 |----------|------|
 | ProviderA | PDA001 |
@@ -32,12 +64,6 @@ Asocia cada producto con su proveedor y el nombre que usa el proveedor.
 | product_name | store | stock_type | provider | provider_product_name |
 |-------------|-------|-----------|----------|----------------------|
 | Cable iPhone 1m | LA_PLATA | ACCESORIOS | ProviderA | CBL-IPH-1M-BK |
-
-### Sheet: `desired_stock`
-Cantidades deseadas por producto (se edita manualmente).
-
-| store | stock_type | product_name | desired_qty |
-|-------|-----------|--------------|-------------|
 
 ## Uso
 
@@ -51,23 +77,31 @@ python3 generate_order.py --store LA_PLATA --stock_type GLASS
 
 ## Flujo de Ejecución
 
-1. Lee el archivo de stock actual (`ACCESORIOS_LA_PLATA_*.xlsx`)
-2. Lee `config.xlsx` → `desired_stock` para obtener cantidades deseadas
-3. Calcula `missing = desired - actual` para cada producto
-4. **Actualiza** `WANTED_ACCESORIOS_LA_PLATA.xlsx` con las diferencias
-5. **Genera** archivos `ORDER_*_{PROVIDER}.xlsx` por cada proveedor que tenga productos faltantes
+1. Lee el stock actual de `GLASS_TABLE` o `ACCESORIOS_TABLE`
+2. Lee `CONFIG_TABLE` → `product_mapping` para mapeo de proveedores
+3. Lee WANTED table → `desired_qty` para cada producto
+4. Calcula `missing = desired - actual` para cada producto
+5. **Actualiza** WANTED table con las diferencias
+6. **Actualiza** ORDER tables:
+   - `ORDER_ACCESORIOS_TABLE`: Busca producto en columna A, actualiza columna de la tienda
+   - `ORDER_GLASS_TABLE`: Busca tab de la tienda, actualiza fila del producto
 
-## Formato de Salida
+## Formato de datos
 
-### WANTED File
+### WANTED Table (STOCK tab)
 | product_name | actual_qty | desired_qty | missing_qty |
 |--------------|------------|-------------|-------------|
+| Cable iPhone 1m | 10 | 50 | 40 |
 
-### ORDER File (por proveedor)
-| provider_product_name | quantity |
-|-----------------------|----------|
+### ORDER_ACCESORIOS Table (ACCE tab)
+- Columna A: productos (agrupados por tipo)
+- Columnas B+: una por cada tienda (COTO, MONTE, BELLA, PILAR, etc.)
 
-## Notas sobre Archivos de Stock
+### ORDER_GLASS Table
+- Una solapa por cada tienda
+- Columna A: modelo, Columna B: cantidad
+
+## Formato de Stock
 
 ### ACCESORIOS
 - Formato: 2 columnas (producto, cantidad)
@@ -77,92 +111,3 @@ python3 generate_order.py --store LA_PLATA --stock_type GLASS
 - Formato: matriz con marcas como headers (SAMSUNG, MOTOROLA, etc.)
 - Columnas: COMUN, 5D, OSC
 - Cada celda representa cantidad para ese modelo+marca+variante
-
----
-
-## Roadmap: Excel Online
-
-### Situación Actual
-Los archivos Excel están en el sistema de archivos local.
-
-### Visión Futura
-Migrar a Excel online (SharePoint/OneDrive) para acceso multi-usuario.
-
-### Opciones Técnicas
-
-#### Opción 1: Microsoft Graph API + SharePoint
-- Acceso via API de Microsoft 365
-- Requiere autenticación OAuth
-- Ideal para integración directa con Microsoft Excel Online
-
-```python
-# Conceptual - no implementado
-from office365.runtime.auth.authentication_context import AuthenticationContext
-from office365.sharepoint.client_context import ClientContext
-
-ctx = ClientContext("https://tenant.sharepoint.com/sites/store")
-ctx.acquire_token_for_app(client_id, client_secret)
-```
-
-#### Opción 2: Google Sheets API
-- Si se migra a Google Sheets
-- Más simple de implementar
-- Requiere credenciales Google Cloud
-
-#### Opción 3: pandas + remote file access
-- Acceso a archivos en OneDrive/Google Drive como archivos remotos
-- Menor complejidad inicial
-- Ejemplo: `pd.read_excel("https://onedrive.live.com/download?...")`
-
-### Pasos para Implementación
-
-1. **Autenticación**
-   - Registrar app en Azure AD (para Microsoft) o Google Cloud (para Google)
-   - Configurar permisos de lectura/escritura
-
-2. **Abstracción de Acceso**
-   - Crear capa `StockProvider` abstracta
-   - Implementar `LocalStockProvider` y `OnlineStockProvider`
-
-```python
-class StockProvider(ABC):
-    @abstractmethod
-    def load_stock(self, store: str, stock_type: str) -> dict:
-        pass
-
-class LocalStockProvider(StockProvider):
-    def load_stock(self, store, stock_type):
-        # implementación actual
-        pass
-
-class OnlineStockProvider(StockProvider):
-    def load_stock(self, store, stock_type):
-        # implementación futura
-        pass
-```
-
-3. **Conflictos de Escritura**
-   - El archivo WANTED se actualiza frecuentemente
-   - Considerar locking o sistema de turnos
-   - Posible solución: cola de cambios en lugar de escritura directa
-
-4. **Configuración**
-   - Agregar sheet `settings` en config.xlsx:
-   ```python
-   {
-       "storage": "local",  # o "onedrive", "googlesheets"
-       "onedrive_url": "https://tenant.sharepoint.com/sites/stock/...",
-   }
-   ```
-
-### Consideraciones de Seguridad
-
-- No guardar credenciales en código
-- Usar environment variables o Azure Key Vault
-- Implementar rotation de tokens
-
-### Métricas de Monitoreo (para versión online)
-
-- Latencia de lectura/escritura
-- Conflictos de edición detectados
-- Tiempo de sync entre usuarios
