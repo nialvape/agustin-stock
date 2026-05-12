@@ -1,0 +1,12 @@
+# === generar_orden.bat / generar_orden.py ===
+#
+# LOCALES:
+#   TODOS  (o ALL, *)  = todos los que tengan link en la pestaña stores
+#   o lista separada por comas (ej: COTO, LA PLATA, SAN MARTIN)
+#
+# GLASS / ACCESORIOS: si | no  (también 1 | 0, true | false)
+
+LOCALES=TODOS
+
+GLASS=si
+ACCESORIOS=si

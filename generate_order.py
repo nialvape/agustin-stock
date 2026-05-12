@@ -1,41 +1,22 @@
 import argparse
 import os
+from collections import defaultdict
 
 from dotenv import load_dotenv
 load_dotenv()
 
-from src.google_sheets import (
-    get_worksheet,
-    get_or_create_worksheet,
-)
+from src.google_sheets import get_worksheet
 from src import glass as glass_utils
+from src import accesorios_order_match as acc_match
 import src.sheet_config as config
 
 
 def load_providers():
-    providers = {}
-    spreadsheet_id = os.environ.get('CONFIG_TABLE')
-    if not spreadsheet_id:
-        print("CONFIG_TABLE not set in .env")
-        return providers
-
     try:
-        ws = get_worksheet(spreadsheet_id, 'providers')
-        if ws is None:
-            return providers
-
-        values = ws.get_all_values()
-        for row in values[1:]:
-            if not row or len(row) < 2:
-                continue
-            provider = str(row[0]).strip()
-            code = str(row[1]).strip()
-            if provider:
-                providers[provider] = code
+        return config.load_providers_from_config()
     except Exception as e:
         print(f"Error loading providers: {e}")
-
-    return providers
+        return {}
 
 
 def load_product_mapping():
@@ -78,7 +59,6 @@ def load_product_mapping():
             'sub_line': col('sub_line'),
             'quality': col('quality'),
             'order_section': col('order_section'),
-            'order_model_name': col('order_model_name'),
         }
 
         def cell(row, key):
@@ -104,7 +84,6 @@ def load_product_mapping():
                 'sub_line': cell(row, 'sub_line'),
                 'quality': cell(row, 'quality'),
                 'order_section': cell(row, 'order_section'),
-                'order_model_name': cell(row, 'order_model_name'),
             })
     except Exception as e:
         print(f"Error loading product_mapping: {e}")
@@ -168,8 +147,10 @@ def parse_stock(spreadsheet_id, stock_type):
         return {}
 
 
-def load_wanted_accesorios(store):
-    wanted_spreadsheet_id = config.get_wanted_spreadsheet_id('ACCESORIOS')
+def load_wanted_accesorios(store, wanted_spreadsheet_id=None):
+    if wanted_spreadsheet_id is None:
+        wanted_spreadsheet_id = config.get_wanted_spreadsheet_id('ACCESORIOS')
+    wanted_spreadsheet_id = (wanted_spreadsheet_id or '').strip()
     if not wanted_spreadsheet_id:
         return {}
     tab = config.get_wanted_tab('ACCESORIOS')
@@ -186,53 +167,62 @@ def load_wanted_accesorios(store):
     if not values:
         return {}
 
-    headers = values[0]
-    product_idx = None
-    desired_idx = None
-    for i, h in enumerate(headers):
-        h_lower = str(h).strip().lower()
-        if h_lower == 'product_name':
-            product_idx = i
-        elif h_lower in ('desired_qty', 'desired'):
-            desired_idx = i
-
-    if product_idx is None:
-        return {}
-    if desired_idx is None:
-        desired_idx = 2
+    # New wanted layout for accessories:
+    #   Columns A and E have product names, grouped vertically by category titles.
+    #   Columns D and H contain the missing stock to order.
+    _CATEGORY_TITLES_A = {'CARGADORES', 'ADAPTADORES', 'CABLES', 'HOLDER'}
+    _CATEGORY_TITLES_E = {'PARLANTES', 'ACCESORIOS', 'MEMO-PEN', 'AURICULARES'}
+    _ALL_CATEGORY_TITLES = _CATEGORY_TITLES_A | _CATEGORY_TITLES_E
 
     desired_stock = {}
-    for row in values[1:]:
-        if not row or len(row) <= product_idx:
-            continue
-        product_name = str(row[product_idx]).strip()
-        if not product_name:
-            continue
-        desired_qty = 0
-        if desired_idx < len(row):
+    for row in values:
+        # Left side: column A (0) = product, column D (3) = missing qty
+        cell_a = str(row[0]).strip() if len(row) > 0 else ''
+        if cell_a and cell_a.upper() not in _ALL_CATEGORY_TITLES:
             try:
-                desired_qty = int(float(row[desired_idx]))
+                qty = int(float(str(row[3]).strip())) if len(row) > 3 and row[3] else 0
             except (ValueError, TypeError):
-                desired_qty = 0
-        key = (store, 'ACCESORIOS', product_name)
-        desired_stock[key] = desired_qty
+                qty = 0
+            if qty > 0:
+                key = (store, 'ACCESORIOS', cell_a)
+                desired_stock[key] = qty
+
+        # Right side: column E (4) = product, column H (7) = missing qty
+        cell_e = str(row[4]).strip() if len(row) > 4 else ''
+        if cell_e and cell_e.upper() not in _ALL_CATEGORY_TITLES:
+            try:
+                qty = int(float(str(row[7]).strip())) if len(row) > 7 and row[7] else 0
+            except (ValueError, TypeError):
+                qty = 0
+            if qty > 0:
+                key = (store, 'ACCESORIOS', cell_e)
+                desired_stock[key] = qty
 
     return desired_stock
 
 
-def load_wanted_glass(store):
-    wanted_spreadsheet_id = config.get_wanted_spreadsheet_id('GLASS')
+def load_wanted_glass(store, wanted_spreadsheet_id=None, glass_layout_out=None):
+    if wanted_spreadsheet_id is None:
+        wanted_spreadsheet_id = config.get_wanted_spreadsheet_id('GLASS')
+    wanted_spreadsheet_id = (wanted_spreadsheet_id or '').strip()
     if not wanted_spreadsheet_id:
         return {}
-    desired = glass_utils.parse_glass_wanted(wanted_spreadsheet_id)
+    desired, uses_faltante = glass_utils.parse_glass_wanted(wanted_spreadsheet_id)
+    if glass_layout_out is not None:
+        glass_layout_out.clear()
+        glass_layout_out.append(uses_faltante)
     return {(store, 'GLASS', key): qty for key, qty in desired.items()}
 
 
-def load_wanted_file(store, stock_type):
+def load_wanted_file(store, stock_type, wanted_spreadsheet_id=None, glass_layout_out=None):
     if stock_type == 'ACCESORIOS':
-        return load_wanted_accesorios(store)
+        return load_wanted_accesorios(store, wanted_spreadsheet_id=wanted_spreadsheet_id)
     if stock_type == 'GLASS':
-        return load_wanted_glass(store)
+        return load_wanted_glass(
+            store,
+            wanted_spreadsheet_id=wanted_spreadsheet_id,
+            glass_layout_out=glass_layout_out,
+        )
     return {}
 
 
@@ -254,47 +244,54 @@ def get_missing(products, desired_stock, store, stock_type):
 
 
 def update_wanted_file_accesorios(store, products, desired_stock):
-    missing = get_missing(products, desired_stock, store, 'ACCESORIOS')
+    # New wanted layout: columns A/E have product names grouped by category
+    # titles, columns D/H have the missing quantities directly. No need to
+    # recalculate or write back to the wanted sheet (the visual layout with
+    # category headers is maintained manually).
+    missing = {}
+    for key, qty in desired_stock.items():
+        s, st, product_key = key
+        if s != store or st != 'ACCESORIOS':
+            continue
+        if qty > 0:
+            actual = products.get(product_key, 0)
+            missing[product_key] = {
+                'actual': actual,
+                'desired': qty,
+                'missing': qty,
+            }
 
-    wanted_spreadsheet_id = config.get_wanted_spreadsheet_id('ACCESORIOS')
-    if not wanted_spreadsheet_id:
-        print("WANTED spreadsheet ID not set")
-        return missing
-
-    tab = config.get_wanted_tab('ACCESORIOS')
-    ws = get_worksheet(wanted_spreadsheet_id, tab)
-    if ws is None:
-        ws = get_or_create_worksheet(wanted_spreadsheet_id, tab)
-        ws.update('A1', [['product_name', 'actual_qty', 'desired_qty', 'missing_qty']])
-
-    existing_rows = ws.get_all_values()
-    existing_products = {}
-    for i, row in enumerate(existing_rows[1:], start=2):
-        if row and len(row) > 0 and row[0]:
-            existing_products[row[0].strip()] = i
-
-    for product_name, data in missing.items():
-        row_num = existing_products.get(product_name)
-        if row_num:
-            ws.update_cell(row_num, 2, data['actual'])
-            ws.update_cell(row_num, 3, data['desired'])
-            ws.update_cell(row_num, 4, data['missing'])
-        else:
-            next_row = len(existing_rows) + 1
-            ws.update_cell(next_row, 1, product_name)
-            ws.update_cell(next_row, 2, data['actual'])
-            ws.update_cell(next_row, 3, data['desired'])
-            ws.update_cell(next_row, 4, data['missing'])
-            existing_rows.append([product_name])
-
-    print(f"Updated wanted file for {store} ACCESORIOS")
+    print(f"Loaded {len(missing)} missing items for {store} ACCESORIOS from wanted sheet")
     return missing
 
 
-def update_wanted_file(store, stock_type, products, desired_stock):
+def update_wanted_file_glass_faltante(store, products, desired_stock):
+    """Cantidades ya en columna faltante del wanted (no restar otra planilla)."""
+    missing = {}
+    for key, qty in desired_stock.items():
+        s, st, product_key = key
+        if s != store or st != 'GLASS':
+            continue
+        if qty > 0:
+            actual = products.get(product_key, 0)
+            missing[product_key] = {
+                'actual': actual,
+                'desired': qty,
+                'missing': qty,
+            }
+    print(
+        f"GLASS: {len(missing)} ítems con faltante>0 (columnas faltante del wanted, "
+        "sin restar stock externo).",
+    )
+    return missing
+
+
+def update_wanted_file(store, stock_type, products, desired_stock, glass_faltante_layout=False):
     if stock_type == 'ACCESORIOS':
         return update_wanted_file_accesorios(store, products, desired_stock)
     if stock_type == 'GLASS':
+        if glass_faltante_layout:
+            return update_wanted_file_glass_faltante(store, products, desired_stock)
         return get_missing(products, desired_stock, store, 'GLASS')
     return {}
 
@@ -305,92 +302,207 @@ def _resolve_section(item_brand, item_sub, item_quality, mapping_section):
     return config.resolve_glass_section(item_brand, item_sub, item_quality)
 
 
-def generate_orders(missing, product_mapping, store, stock_type):
-    if stock_type == 'ACCESORIOS':
-        return _generate_orders_accesorios(missing, product_mapping, store)
-    if stock_type == 'GLASS':
-        return _generate_orders_glass(missing, product_mapping, store)
+def _default_provider_for_orders(providers: dict) -> str:
+    for name in sorted(providers.keys()):
+        if (providers[name].get('order_spreadsheet_id') or '').strip():
+            return name
+    return sorted(providers.keys())[0] if providers else 'ProviderA'
 
 
-def _generate_orders_accesorios(missing, product_mapping, store):
-    provider_products = {}
-    for mapping in product_mapping:
-        if mapping['store'] != store or mapping['stock_type'] != 'ACCESORIOS':
+def _union_order_accesorios_product_names(providers: dict) -> list:
+    """Column A product names from every provider order sheet (deduped, stable order)."""
+    seen = set()
+    out = []
+    for pdata in providers.values():
+        oid = (pdata.get('order_spreadsheet_id') or '').strip()
+        if not oid:
             continue
-        product_name = mapping['product_name']
-        if product_name in missing:
-            provider = mapping['provider']
-            provider_product_name = mapping['provider_product_name']
+        for n in acc_match.load_order_accesorios_product_names(
+            oid, config.ORDER_ACCESORIOS_TAB,
+        ):
+            if n not in seen:
+                seen.add(n)
+                out.append(n)
+    return out
+
+
+def _provider_order_spreadsheet_ids(providers: dict) -> dict:
+    return {
+        k: v['order_spreadsheet_id'].strip()
+        for k, v in providers.items()
+        if (v.get('order_spreadsheet_id') or '').strip()
+    }
+
+
+def _normalize_store_label(name: str) -> str:
+    """Comparar locales ignorando mayúsculas y espacios repetidos."""
+    return " ".join((name or "").split()).upper()
+
+
+def _find_store_row(stores: list, store_name: str):
+    target = _normalize_store_label(store_name)
+    for row in stores:
+        if _normalize_store_label(row.get("store") or "") == target:
+            return row
+    return None
+
+
+def _wanted_id_for_store(stock_type: str, store_row: dict | None) -> str | None:
+    if not store_row:
+        return None
+    if stock_type == 'GLASS':
+        return (store_row.get('wanted_glass_id') or '').strip() or None
+    return (store_row.get('wanted_accesorios_id') or '').strip() or None
+
+
+def generate_orders(missing, product_mapping, store, stock_type, providers):
+    if stock_type == 'ACCESORIOS':
+        return _generate_orders_accesorios(missing, product_mapping, store, providers)
+    if stock_type == 'GLASS':
+        return _generate_orders_glass(missing, product_mapping, store, providers)
+
+
+def _generate_orders_accesorios(missing, product_mapping, store, providers):
+    if not providers:
+        print("No hay proveedores en la pestaña providers de CONFIG.")
+        return
+
+    order_names = _union_order_accesorios_product_names(providers)
+    provider_order_ids = _provider_order_spreadsheet_ids(providers)
+    if not provider_order_ids:
+        print(
+            "No hay links de order en la pestaña providers (columna order). "
+            "Completá la columna o definí ORDER_ACCESORIOS_TABLE en .env como respaldo.",
+        )
+        legacy = (config.get_order_spreadsheet_id('ACCESORIOS') or '').strip()
+        if legacy:
+            for name in providers:
+                provider_order_ids[name] = legacy
+        else:
+            return
+
+    default_provider = _default_provider_for_orders(providers)
+
+    mapping_specific: dict = {}
+    mapping_generic: dict = {}
+    for m in product_mapping:
+        if (m.get('stock_type') or '').upper() != 'ACCESORIOS':
+            continue
+        pn = (m.get('product_name') or '').strip()
+        if not pn:
+            continue
+        row_store = (m.get('store') or '').strip()
+        if row_store:
+            if row_store == store:
+                mapping_specific[pn] = m
+        else:
+            mapping_generic[pn] = m
+
+    def lookup_mapping(product_name: str):
+        return mapping_specific.get(product_name) or mapping_generic.get(product_name)
+
+    provider_products = {}
+    mapped_names = set()
+    for product_name, data in missing.items():
+        m = lookup_mapping(product_name)
+        provider = None
+        provider_product_name = None
+        if m is not None:
+            provider = (m.get('provider') or '').strip()
+            provider_product_name = (m.get('provider_product_name') or '').strip()
+            if not provider or not provider_product_name:
+                print(f"WARNING: mapping for {product_name!r} lacks provider or provider_product_name")
+        if (not provider or not provider_product_name) and order_names:
+            auto_order, why = acc_match.match_wanted_to_order(product_name, order_names)
+            if auto_order:
+                provider_product_name = auto_order
+                provider = default_provider
+                print(f"  match {product_name!r} -> {auto_order!r} ({why})")
+        if provider and provider_product_name:
             provider_products.setdefault(provider, []).append({
                 'provider_product_name': provider_product_name,
-                'quantity': missing[product_name]['missing'],
+                'quantity': data['missing'],
             })
+            mapped_names.add(product_name)
+
+    unmapped = set(missing.keys()) - mapped_names
+    if unmapped:
+        print(f"WARNING: {len(unmapped)} missing products sin mapeo ni match automático:")
+        for name in sorted(unmapped)[:25]:
+            print(f"  - {name}")
+        if len(unmapped) > 25:
+            print(f"  ... and {len(unmapped) - 25} more")
 
     if not provider_products:
         print(f"No products to order for {store} ACCESORIOS")
         return
 
-    update_order_accesorios(provider_products, store)
+    update_order_accesorios(provider_products, store, provider_order_ids)
 
 
-def _generate_orders_glass(missing, product_mapping, store):
-    mapping_by_key = {}
+def _generate_orders_glass(missing, product_mapping, store, providers):
+    """Build order items from missing GLASS stock and write to the order sheet.
+
+    product_mapping rows without a ``store`` apply to every store; rows with
+    an explicit ``store`` override the generic entry for that store only.
+    """
+    if not providers:
+        print("No hay proveedores en la pestaña providers de CONFIG.")
+        return None
+
+    # Index mapping by (brand, sub_line, model, quality)
+    mapping_specific: dict = {}
+    mapping_generic: dict = {}
     for m in product_mapping:
-        if (m['stock_type'] or '').upper() != 'GLASS':
-            continue
-        if m.get('store') and m['store'] != store:
+        if (m.get('stock_type') or '').upper() != 'GLASS':
             continue
         brand = (m.get('brand') or '').strip().upper()
         sub = (m.get('sub_line') or '').strip().upper()
         quality = (m.get('quality') or '').strip().upper()
-        stock_model = (m.get('provider_product_name') or m.get('product_name') or '').strip()
+        stock_model = (m.get('product_name') or '').strip()
         if not stock_model or not brand or not quality:
             continue
         key = (brand, sub, stock_model, quality)
-        mapping_by_key[key] = m
+        row_store = (m.get('store') or '').strip()
+        if row_store:
+            if row_store == store:
+                mapping_specific[key] = m
+        else:
+            mapping_generic[key] = m
 
+    def lookup_mapping(key):
+        return mapping_specific.get(key) or mapping_generic.get(key)
+
+    default_provider = _default_provider_for_orders(providers)
+    provider_order_ids = _provider_order_spreadsheet_ids(providers)
+    if not provider_order_ids:
+        legacy = (config.get_order_spreadsheet_id('GLASS') or '').strip()
+        if legacy:
+            provider_order_ids = {name: legacy for name in providers}
+
+    # Resolve each faltante item into an order line
     items_to_write = []
-    summary = {
-        'processed': 0,
-        'skipped_moto_xiaomi_osc': 0,
-        'skipped_no_section': 0,
-        'no_mapping': 0,
-        'to_write': 0,
-    }
+    counts = {'processed': 0, 'no_section': 0, 'no_mapping': 0}
 
     for key, data in missing.items():
         brand, sub_line, model, quality = key
-        summary['processed'] += 1
+        counts['processed'] += 1
 
-        m = mapping_by_key.get(key)
-        order_section = None
-        order_model_name = model
-        if m is not None:
-            order_section = m.get('order_section') or None
-            order_model_name = m.get('order_model_name') or model
+        m = lookup_mapping(key)
+        order_section = (m.get('order_section') or None) if m else None
+        order_model_name = ((m.get('provider_product_name') or '').strip() or model) if m else model
 
         section = _resolve_section(brand, sub_line, quality, order_section)
         if section is None:
-            if quality.upper() == 'OSC' and brand.upper() in ('MOTOROLA', 'XIAOMI'):
-                summary['skipped_moto_xiaomi_osc'] += 1
-                print(
-                    f"WARNING: OSC + {brand} sin secci\u00f3n destino "
-                    f"({model}) - skip"
-                )
-            else:
-                summary['skipped_no_section'] += 1
-                print(
-                    f"WARNING: no section for {brand} {sub_line} {model} {quality}"
-                )
+            counts['no_section'] += 1
+            print(f"  skip: sin sección destino → {brand} {sub_line} {model} {quality}")
             continue
 
         if m is None:
-            summary['no_mapping'] += 1
-            print(
-                f"WARNING: producto sin mapping en product_mapping: "
-                f"{brand} {sub_line} {model} {quality} -> usando default "
-                f"section={section} order_model_name={order_model_name}"
-            )
+            counts['no_mapping'] += 1
+            print(f"  sin mapping → {brand} {sub_line} {model} {quality}  (sección={section})")
+
+        prov = ((m.get('provider') or '').strip() if m else '') or default_provider
 
         items_to_write.append({
             'brand': brand,
@@ -400,60 +512,147 @@ def _generate_orders_glass(missing, product_mapping, store):
             'order_section': section,
             'order_model_name': order_model_name,
             'quantity': data['missing'],
+            'provider': prov,
         })
-        summary['to_write'] += 1
+
+    print(
+        f"GLASS {store}: {counts['processed']} ítems procesados, "
+        f"{len(items_to_write)} a escribir, "
+        f"{counts['no_section']} sin sección, "
+        f"{counts['no_mapping']} sin mapping.",
+    )
 
     if not items_to_write:
-        print(f"No products to order for {store} GLASS")
-        return summary
+        print(f"No hay productos a pedir para {store} GLASS.")
+        return counts
 
-    update_order_glass(items_to_write, store, summary)
-    return summary
+    if not provider_order_ids:
+        print(
+            "No hay planillas de pedido GLASS: completá la columna order en providers "
+            "o ORDER_GLASS_TABLE en .env.",
+        )
+        return counts
+
+    by_provider: dict = defaultdict(list)
+    for it in items_to_write:
+        prov = it.pop('provider')
+        by_provider[prov].append(it)
+
+    for prov, subitems in sorted(by_provider.items()):
+        oid = provider_order_ids.get(prov)
+        if not oid:
+            print(f"  proveedor {prov!r} sin link de pedido — se omiten {len(subitems)} ítems.")
+            continue
+        print(f"  ORDER_GLASS proveedor={prov!r} spreadsheet={oid[:12]}…")
+        update_order_glass(subitems, store, spreadsheet_id=oid)
+
+    return counts
 
 
-def update_order_accesorios(provider_products, store):
-    spreadsheet_id = config.get_order_spreadsheet_id('ACCESORIOS')
-    if not spreadsheet_id:
-        print("ORDER_ACCESORIOS_TABLE not set")
-        return
+def _resolve_acce_store_column_1based(header_row, store: str):
+    """Column index 1-based for ``store`` in ORDER ACCE header (row 1)."""
+    target = (store or '').strip().upper()
+    for i, cell in enumerate(header_row):
+        if str(cell).strip().upper() == target:
+            return i + 1
+    return None
 
+
+def update_order_accesorios(provider_products, store, provider_order_ids: dict):
     tab = config.ORDER_ACCESORIOS_TAB
-    ws = get_worksheet(spreadsheet_id, tab)
-    if ws is None:
-        print(f"Worksheet '{tab}' not found")
-        return
-
-    store_columns = config.get_store_columns_order_accesorios()
-    try:
-        store_col = store_columns.index(store) + 2
-    except ValueError:
-        print(f"Store '{store}' not found in ORDER_ACCESORIOS columns")
-        return
-
-    all_values = ws.get_all_values()
-    product_rows = {}
-    for i, row in enumerate(all_values[1:], start=2):
-        if row and len(row) > 0 and row[0]:
-            product_rows[row[0].strip()] = i
 
     for provider, items in provider_products.items():
+        spreadsheet_id = provider_order_ids.get(provider)
+        if not spreadsheet_id:
+            print(
+                f"WARNING: proveedor {provider!r} sin link en columna order; "
+                f"no se escribe pedido ACCE ({len(items)} líneas)",
+            )
+            continue
+
+        ws = get_worksheet(spreadsheet_id, tab)
+        if ws is None:
+            print(f"Worksheet '{tab}' not found en order de {provider!r}")
+            continue
+
+        all_values = ws.get_all_values()
+        if not all_values:
+            print(f"Worksheet '{tab}' is empty ({provider!r})")
+            continue
+
+        header = all_values[0]
+        store_col = _resolve_acce_store_column_1based(header, store)
+        if store_col is None:
+            print(
+                f"Store '{store}' not found in ORDER_ACCESORIOS header ({provider!r}). "
+                f"Headers seen: {[str(h).strip() for h in header[:15] if str(h).strip()]}"
+            )
+            continue
+
+        product_rows = {}
+        for i, row in enumerate(all_values[1:], start=2):
+            if row and len(row) > 0 and row[0]:
+                product_rows[row[0].strip()] = i
+
+        qty_by_product: dict = {}
+        sources_by_product: dict = {}
         for item in items:
             provider_product_name = item['provider_product_name']
-            quantity = item['quantity']
+            quantity = int(item['quantity'])
+            qty_by_product[provider_product_name] = (
+                qty_by_product.get(provider_product_name, 0) + quantity
+            )
+            sources_by_product.setdefault(provider_product_name, []).append(
+                f'{provider}:{quantity}'
+            )
+
+        batch_updates = []
+        log_lines = []
+        not_found = []
+        for provider_product_name, total in qty_by_product.items():
             row_num = product_rows.get(provider_product_name)
-            if row_num:
-                ws.update_cell(row_num, store_col, quantity)
-                print(f"Updated {provider_product_name} -> {quantity} in column {store_col}")
+            if not row_num:
+                not_found.append(provider_product_name)
+                continue
+            cell_a1 = f'{_col_letter(store_col)}{row_num}'
+            batch_updates.append({'range': cell_a1, 'values': [[total]]})
+            srcs = sources_by_product.get(provider_product_name, [])
+            if len(srcs) > 1:
+                log_lines.append(
+                    f"[{provider}] Updated {provider_product_name} -> {total} in {cell_a1} "
+                    f"(sum of {len(srcs)} lines: {', '.join(srcs)})"
+                )
             else:
-                print(f"Product '{provider_product_name}' not found in ORDER_ACCESORIOS")
+                log_lines.append(
+                    f"[{provider}] Updated {provider_product_name} -> {total} in {cell_a1}"
+                )
 
-    print(f"Updated ORDER_ACCESORIOS for store: {store}")
+        if not_found:
+            for name in not_found:
+                print(f"[{provider}] Product '{name}' not found in ORDER_ACCESORIOS")
+
+        if batch_updates:
+            chunk_size = 100
+            for i in range(0, len(batch_updates), chunk_size):
+                chunk = batch_updates[i:i + chunk_size]
+                try:
+                    ws.batch_update(chunk, value_input_option='USER_ENTERED')
+                except TypeError:
+                    ws.batch_update(chunk)
+
+        for line in log_lines:
+            print(line)
+
+        print(
+            f"Updated ORDER_ACCESORIOS provider={provider!r} store={store!r} "
+            f"({len(batch_updates)} cells)"
+        )
 
 
-def update_order_glass(items, store, summary=None):
-    spreadsheet_id = config.get_order_spreadsheet_id('GLASS')
+def update_order_glass(items, store, spreadsheet_id=None):
+    spreadsheet_id = (spreadsheet_id or '').strip() or config.get_order_spreadsheet_id('GLASS')
     if not spreadsheet_id:
-        print("ORDER_GLASS_TABLE not set")
+        print("ORDER_GLASS: sin spreadsheet (columna order en providers ni ORDER_GLASS_TABLE)")
         return
 
     if store in config.ORDER_GLASS_LEGACY_TABS:
@@ -473,9 +672,9 @@ def update_order_glass(items, store, summary=None):
 
     index = glass_utils.index_order_sheet(values)
 
-    batch_updates = []
-    written = 0
+    cell_aggregations: dict = {}
     not_found = 0
+
     for item in items:
         section = item['order_section']
         order_model_name = item['order_model_name']
@@ -497,13 +696,35 @@ def update_order_glass(items, store, summary=None):
             continue
 
         row, col = cell_info
-        cell_a1 = f"{_col_letter(col)}{row}"
-        batch_updates.append({'range': cell_a1, 'values': [[quantity]]})
-        written += 1
-        print(
-            f"  -> [{section}] {order_model_name} = {quantity} "
-            f"(cell={cell_a1})"
+        agg = cell_aggregations.setdefault(
+            (row, col),
+            {'section': section, 'order_model_name': order_model_name,
+             'quantity': 0, 'sources': []},
         )
+        agg['quantity'] += quantity
+        agg['sources'].append(
+            f"{item['brand']} {item['sub_line']} {item['model']} {item['quality']}={quantity}"
+        )
+
+    batch_updates = []
+    written = 0
+    aggregated_cells = 0
+    for (row, col), agg in cell_aggregations.items():
+        cell_a1 = f"{_col_letter(col)}{row}"
+        batch_updates.append({'range': cell_a1, 'values': [[agg['quantity']]]})
+        written += 1
+        if len(agg['sources']) > 1:
+            aggregated_cells += 1
+            print(
+                f"  -> [{agg['section']}] {agg['order_model_name']} = "
+                f"{agg['quantity']} (cell={cell_a1}, agregado de "
+                f"{len(agg['sources'])} items: {', '.join(agg['sources'])})"
+            )
+        else:
+            print(
+                f"  -> [{agg['section']}] {agg['order_model_name']} = "
+                f"{agg['quantity']} (cell={cell_a1})"
+            )
 
     if batch_updates:
         try:
@@ -511,12 +732,9 @@ def update_order_glass(items, store, summary=None):
         except TypeError:
             ws.batch_update(batch_updates)
 
-    if summary is not None:
-        summary['written'] = written
-        summary['not_found_in_order'] = not_found
     print(
-        f"Updated ORDER_GLASS for store '{store}': written={written}, "
-        f"not_found={not_found}"
+        f"  ORDER_GLASS '{store}': {written} celdas escritas, "
+        f"{aggregated_cells} agregadas, {not_found} no encontradas.",
     )
 
 
@@ -529,46 +747,149 @@ def _col_letter(col_1based: int) -> str:
     return s
 
 
+def _build_store_jobs(stock_type: str, store_arg: str | None):
+    """List of (store_name, wanted_spreadsheet_id).
+
+    Si existe la pestaña ``stores`` con filas, los links B/C tienen prioridad
+    absoluta: no se sustituye por WANTED_* del .env salvo que la pestaña esté
+    vacía (modo legacy sin config de locales).
+    """
+    stores = config.load_stores_rows()
+    env_wanted = (config.get_wanted_spreadsheet_id(stock_type) or "").strip() or None
+    stores_configured = bool(stores)
+
+    if store_arg:
+        name = store_arg.strip()
+        row = _find_store_row(stores, name)
+        if row:
+            wid = _wanted_id_for_store(stock_type, row)
+            if not wid:
+                col = "B (GLASS)" if stock_type == "GLASS" else "C (ACCESORIOS)"
+                print(
+                    f"La fila de {name!r} en la pestaña stores no tiene link en {col}. "
+                    "Completá la celda en la planilla CONFIG; no se usa WANTED_* del .env "
+                    "cuando el local está en stores.",
+                )
+                return []
+            canonical = (row.get("store") or name).strip()
+            return [(canonical, wid)]
+        if stores_configured:
+            known = ", ".join(repr((r.get("store") or "").strip()) for r in stores[:20])
+            more = "…" if len(stores) > 20 else ""
+            print(
+                f"No hay fila en la pestaña stores para el local {name!r}. "
+                f"Revisá el nombre (debe coincidir con la columna NAME). "
+                f"Locales en config: {known}{more}",
+            )
+            return []
+        if env_wanted:
+            print(
+                "Advertencia: no hay pestaña stores (o está vacía); "
+                f"se usa WANTED_{stock_type} del .env para {name!r}.",
+            )
+            return [(name, env_wanted)]
+        print(
+            f"No se encontró {name!r} en stores y no hay WANTED_* en .env.",
+        )
+        return []
+
+    if not stores:
+        print(
+            "Sin --store: hace falta la pestaña stores en CONFIG con columnas "
+            "A=local, B=GLASS, C=ACCESORIOS (links a wanted).",
+        )
+        return []
+
+    jobs = []
+    for row in stores:
+        s = (row.get("store") or "").strip()
+        if not s:
+            continue
+        wid = _wanted_id_for_store(stock_type, row)
+        if not wid:
+            print(
+                f"Omitido {s!r}: falta link de wanted para {stock_type} "
+                f"({'columna B' if stock_type == 'GLASS' else 'columna C'}).",
+            )
+            continue
+        jobs.append((s, wid))
+    return jobs
+
+
+def run_pipeline(store: str, stock_type: str, wanted_spreadsheet_id: str | None,
+                 product_mapping, providers):
+    glass_layout: list = []
+    desired_stock = load_wanted_file(
+        store, stock_type, wanted_spreadsheet_id=wanted_spreadsheet_id,
+        glass_layout_out=glass_layout,
+    )
+    glass_faltante_layout = bool(glass_layout and glass_layout[0])
+
+    if not desired_stock:
+        print(f"No hay cantidades a pedir en WANTED para {store!r} ({stock_type}).")
+        return
+
+    if stock_type == 'GLASS' and glass_faltante_layout:
+        products = {}
+        print(
+            "WANTED GLASS: layout con columnas «faltante»; "
+            "no se usa GLASS_TABLE del .env (el pedido sale solo de esas celdas).",
+        )
+    else:
+        stock_spreadsheet_id = (config.get_stock_spreadsheet_id(stock_type) or '').strip() or None
+        products = {}
+        if stock_spreadsheet_id:
+            print(f"Leyendo stock de referencia (env): {stock_spreadsheet_id}")
+            try:
+                products = parse_stock(stock_spreadsheet_id, stock_type)
+            except Exception as e:
+                print(f"Error reading stock: {e}")
+                products = {}
+        else:
+            print(
+                "GLASS_TABLE / ACCESORIOS_TABLE no definidos: solo se usa el WANTED "
+                "(GLASS clásico: faltante = deseado − stock leído; sin stock, deseado).",
+            )
+
+    print(f"Productos en stock (referencia): {len(products)}")
+
+    if not products and not desired_stock:
+        print("Sin datos de stock ni de wanted; no hay nada que procesar.")
+        return
+
+    missing = update_wanted_file(
+        store, stock_type, products, desired_stock,
+        glass_faltante_layout=glass_faltante_layout,
+    )
+    print(f"Productos con faltante: {len(missing)}")
+    if missing:
+        result = generate_orders(missing, product_mapping, store, stock_type, providers)
+        if isinstance(result, dict):
+            print("Summary:", result)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Generate stock orders from Google Sheets")
-    parser.add_argument('--store', required=True, help="Store identifier (e.g., LA PLATA)")
+    parser.add_argument(
+        '--store',
+        required=False,
+        default=None,
+        help="Local (ej. LA PLATA). Si se omite, se procesan todos los de la pestaña stores.",
+    )
     parser.add_argument('--stock_type', required=True, choices=['ACCESORIOS', 'GLASS'],
                         help="Stock type")
     args = parser.parse_args()
 
-    load_providers()
+    providers = load_providers()
     product_mapping = load_product_mapping()
 
-    desired_stock = load_wanted_file(args.store, args.stock_type)
-
-    stock_spreadsheet_id = config.get_stock_spreadsheet_id(args.stock_type)
-    if not stock_spreadsheet_id:
-        print(f"Stock spreadsheet ID not set for {args.stock_type}")
+    jobs = _build_store_jobs(args.stock_type, args.store)
+    if not jobs:
         return
 
-    print(f"Reading stock from: {stock_spreadsheet_id}")
-
-    try:
-        products = parse_stock(stock_spreadsheet_id, args.stock_type)
-    except Exception as e:
-        print(f"Error reading stock: {e}")
-        products = {}
-
-    print(f"Found {len(products)} products in stock file")
-
-    if not products:
-        print("No products found in stock")
-        return
-
-    if desired_stock:
-        missing = update_wanted_file(args.store, args.stock_type, products, desired_stock)
-        print(f"Found {len(missing)} products with missing stock")
-        if missing:
-            result = generate_orders(missing, product_mapping, args.store, args.stock_type)
-            if isinstance(result, dict):
-                print("Summary:", result)
-    else:
-        print(f"No desired stock configured for {args.store} {args.stock_type}")
+    for store, wid in jobs:
+        print(f"\n=== {store} ({args.stock_type}) wanted={wid[:12]}… ===")
+        run_pipeline(store, args.stock_type, wid, product_mapping, providers)
 
 
 if __name__ == "__main__":

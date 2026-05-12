@@ -21,16 +21,22 @@ def populate_test_data(test_fill: bool = False):
 
 
 def populate_product_mapping(test_stores=None):
-    """Populate the product_mapping tab.
+    """Append missing rows to product_mapping without overwriting user edits.
 
-    GLASS mappings are seeded only for the stores in ``test_stores`` (defaults
-    to ``['LA PLATA']`` to keep test runs manageable). Existing GLASS rows in
-    the tab are removed and replaced; existing ACCESORIOS rows are preserved.
+    - ``product_name`` holds the model name exactly as it appears in the stock
+      sheet (e.g. ``A02/A02S``).
+    - ``provider_product_name`` is left blank for the user to fill in with the
+      name the provider uses for that product.
+    - GLASS rows are seeded as generic (empty ``store``) by default so they
+      apply to every store. A store-specific row in the sheet acts as an
+      override.
+    - Rows are deduped by the natural key
+      ``(brand, sub_line, quality, product_name, store)``.
     """
     print("--- Populating product_mapping ---")
 
     if test_stores is None:
-        test_stores = ['COTO']
+        test_stores = ['']
 
     spreadsheet_id = os.environ.get('CONFIG_TABLE')
     if not spreadsheet_id:
@@ -47,33 +53,48 @@ def populate_product_mapping(test_stores=None):
 
         expected = [h.lower() for h in config.PRODUCT_MAPPING_HEADERS]
         if existing_headers != expected:
+            migrated = _migrate_product_mapping_rows(existing_headers, existing_values[1:] if existing_values else [])
             ws.clear()
             _write_header_row(ws, config.PRODUCT_MAPPING_HEADERS)
-            existing_values = [config.PRODUCT_MAPPING_HEADERS]
+            if migrated:
+                ws.append_rows(migrated)
+            existing_values = ws.get_all_values()
+            existing_headers = [h.strip().lower() for h in existing_values[0]]
+            print(f"Migrated {len(migrated)} existing rows to current schema")
 
-        try:
-            stock_type_idx = existing_headers.index('stock_type') if existing_headers else 2
-        except ValueError:
-            stock_type_idx = 2
+        def _col(name):
+            try:
+                return existing_headers.index(name)
+            except ValueError:
+                return -1
 
-        preserved_rows = []
+        idx_product = _col('product_name')
+        idx_store = _col('store')
+        idx_stock_type = _col('stock_type')
+        idx_brand = _col('brand')
+        idx_sub = _col('sub_line')
+        idx_quality = _col('quality')
+
+        def _get(row, i):
+            return row[i].strip() if 0 <= i < len(row) else ''
+
+        existing_glass_keys = set()
+        existing_acc_products = set()
         for row in existing_values[1:]:
             if not row:
                 continue
-            stock_type = row[stock_type_idx].strip().upper() if len(row) > stock_type_idx else ''
+            stock_type = _get(row, idx_stock_type).upper()
             if stock_type == 'GLASS':
-                continue
-            preserved_rows.append(row)
-
-        ws.clear()
-        _write_header_row(ws, config.PRODUCT_MAPPING_HEADERS)
-        if preserved_rows:
-            ws.append_rows(preserved_rows)
-
-        existing_keys = set()
-        for row in preserved_rows:
-            if row and row[0]:
-                existing_keys.add(row[0].strip())
+                key = (
+                    _get(row, idx_brand).upper(),
+                    _get(row, idx_sub).upper(),
+                    _get(row, idx_quality).upper(),
+                    _get(row, idx_product),
+                    _get(row, idx_store),
+                )
+                existing_glass_keys.add(key)
+            elif stock_type == 'ACCESORIOS':
+                existing_acc_products.add(_get(row, idx_product))
 
         new_rows = []
 
@@ -86,16 +107,16 @@ def populate_product_mapping(test_stores=None):
                     for row in values[1:]:
                         if row and len(row) > 0 and row[0]:
                             product_name = row[0].strip()
-                            if product_name and product_name not in existing_keys:
+                            if product_name and product_name not in existing_acc_products:
                                 new_rows.append([
                                     product_name,
-                                    'LA PLATA',
+                                    '',
                                     'ACCESORIOS',
-                                    'ProviderA',
+                                    '',
                                     product_name,
-                                    '', '', '', '', '',
+                                    '', '', '', '',
                                 ])
-                                existing_keys.add(product_name)
+                                existing_acc_products.add(product_name)
             except Exception as e:
                 print(f"Skipping ORDER_ACCESORIOS: {e}")
 
@@ -104,6 +125,8 @@ def populate_product_mapping(test_stores=None):
         order_index_by_store: dict = {}
         if order_glass_sp:
             for store in test_stores:
+                if not store:
+                    continue
                 try:
                     ws_o = get_worksheet(order_glass_sp, store)
                     if ws_o is None:
@@ -122,33 +145,34 @@ def populate_product_mapping(test_stores=None):
                     section = config.resolve_glass_section(brand, sub_line, quality) or ''
 
                     for store in test_stores:
-                        label = f"{brand}{('/' + sub_line) if sub_line else ''} {model} {quality} @ {store}"
-                        if label in existing_keys:
+                        natural_key = (
+                            brand.upper(), sub_line.upper(), quality.upper(),
+                            model, store,
+                        )
+                        if natural_key in existing_glass_keys:
                             continue
-                        order_model = _match_order_model(
-                            order_index_by_store.get(store, {}),
-                            section,
-                            model,
+                        order_model = (
+                            _match_order_model(order_index_by_store.get(store, {}), section, model)
+                            if store else model
                         )
                         new_rows.append([
-                            label,
+                            model,
                             store,
                             'GLASS',
                             '',
-                            model,
+                            order_model,
                             brand,
                             sub_line,
                             quality,
                             section,
-                            order_model,
                         ])
-                        existing_keys.add(label)
+                        existing_glass_keys.add(natural_key)
             except Exception as e:
                 print(f"Skipping GLASS mapping seed: {e}")
 
         if new_rows:
             ws.append_rows(new_rows)
-        print(f"Added {len(new_rows)} product mappings")
+        print(f"Added {len(new_rows)} product mappings (existing rows preserved)")
 
     except Exception as e:
         print(f"Error populating product_mapping: {e}")
@@ -178,44 +202,24 @@ def populate_wanted_accesorios(wanted_sp: str):
     if ws is None:
         ws = get_or_create_worksheet(wanted_sp, tab)
 
-    headers = ws.get_all_values()
-    if not headers or len(headers) < 1 or not headers[0] or headers[0][0].strip().lower() != 'product_name':
-        ws.update(values=[['product_name', 'actual_qty', 'desired_qty', 'missing_qty']], range_name='A1')
-
-    stock_sp = config.get_stock_spreadsheet_id('ACCESORIOS')
-    if not stock_sp:
-        return
-
-    products = _parse_accessories_stock(stock_sp)
-    if not products:
-        return
-
-    existing_rows = ws.get_all_values()
-    existing = {}
-    for i, row in enumerate(existing_rows[1:], start=2):
-        if row and len(row) > 0 and row[0]:
-            existing[row[0].strip()] = i
-
-    new_rows = []
-    for product_name, actual_qty in products.items():
-        if product_name in existing:
-            continue
-        desired_qty = actual_qty + 5
-        missing_qty = max(0, desired_qty - actual_qty)
-        new_rows.append([product_name, actual_qty, desired_qty, missing_qty])
-
-    if new_rows:
-        ws.append_rows(new_rows)
-    print(f"Updated WANTED_ACCESORIOS with {len(new_rows)} new rows")
+    # The wanted sheet now uses a visual layout maintained manually:
+    #   columns A/E = product names grouped by category headers
+    #   columns D/H = missing quantities
+    # We do not overwrite or auto-populate rows so the manual layout stays intact.
+    print(f"WANTED_ACCESORIOS sheet '{tab}' ready (manual layout preserved)")
 
 
 def populate_wanted_glass(wanted_sp: str, test_fill: bool = False):
-    """Clone the layout of the GLASS stock sheet into the WANTED GLASS sheet.
+    """Rebuild the WANTED GLASS layout, preserving user-entered desired values.
 
-    If the wanted sheet is empty, the stock grid (brand headers + model names)
-    is mirrored exactly. When ``test_fill`` is True the script additionally
-    writes a ``desired`` value for every non-COMUN cell that is guaranteed to be
-    smaller than the stock value (forces missing > 0 for every product).
+    Next to COMUN/5D/OSC there is a ``stock`` column with ``IMPORTRANGE`` pointing
+    at the same cell on the stock sheet. The spreadsheet URL is read from
+    ``config.WANTED_GLASS_STOCK_URL_CELL`` (default ``$Q$1``) so duplicating
+    the wanted file only requires updating that cell. Formulas use ``;`` as the
+    argument separator (locale used in Spanish Google Sheets).
+
+    When ``test_fill`` is True the desired columns for 5D/OSC get ``actual + 2``
+    (or 1 if stock=0) using the stock snapshot from the API (not the formula).
     """
     stock_sp = config.get_stock_spreadsheet_id('GLASS')
     if not stock_sp:
@@ -228,8 +232,8 @@ def populate_wanted_glass(wanted_sp: str, test_fill: bool = False):
         return
 
     stock_values = stock_ws.get_all_values()
-    blocks = glass_utils.detect_blocks(stock_values)
-    if not blocks:
+    stock_blocks = glass_utils.detect_blocks(stock_values)
+    if not stock_blocks:
         print("No GLASS blocks detected in stock")
         return
 
@@ -238,16 +242,125 @@ def populate_wanted_glass(wanted_sp: str, test_fill: bool = False):
         wanted_ws = get_or_create_worksheet(wanted_sp, config.WANTED_GLASS_TAB)
 
     wanted_values = wanted_ws.get_all_values()
-    has_layout = bool(glass_utils.detect_blocks(wanted_values))
+    existing_desired = _extract_existing_desired(wanted_values)
 
-    if not has_layout:
-        _write_glass_layout(wanted_ws, stock_values, blocks)
-        wanted_values = wanted_ws.get_all_values()
-        print("Cloned GLASS layout into WANTED tab")
-
+    _write_glass_layout_with_stock(
+        wanted_ws,
+        stock_values,
+        stock_blocks,
+        existing_desired=existing_desired,
+        test_fill=test_fill,
+    )
     if test_fill:
-        _fill_test_desired(wanted_ws, wanted_values, stock_values, blocks)
-        print("Filled WANTED GLASS with test desired values (always > stock)")
+        print(
+            "Wrote WANTED GLASS (IMPORTRANGE desde "
+            f"{config.WANTED_GLASS_STOCK_URL_CELL}; verificar URL en Q1) + test desired"
+        )
+    else:
+        print(
+            "Wrote WANTED GLASS (IMPORTRANGE desde "
+            f"{config.WANTED_GLASS_STOCK_URL_CELL}; poner URL del stock en Q1 si falta)"
+        )
+
+
+def _extract_existing_desired(wanted_values):
+    """Pull existing (brand, sub, model, quality) -> desired_qty from a wanted sheet.
+
+    Robust against both the legacy 4-col layout and the new 7-col layout because
+    detect_blocks now accepts both.
+    """
+    desired = {}
+    if not wanted_values:
+        return desired
+    blocks = glass_utils.detect_blocks(wanted_values)
+    for block in blocks:
+        for model, row_idx in zip(block['models'], block['model_rows']):
+            row = wanted_values[row_idx] if row_idx < len(wanted_values) else []
+            for quality, col in block['qualities'].items():
+                if col < len(row):
+                    cell = row[col]
+                    if cell and str(cell).strip():
+                        try:
+                            desired[(block['brand'], block['sub_line'], model, quality)] = int(float(cell))
+                        except (ValueError, TypeError):
+                            pass
+    return desired
+
+
+def _migrate_product_mapping_rows(old_headers, old_rows):
+    """Convert legacy product_mapping rows to the current 9-column schema.
+
+    Legacy schema had a 10th column ``order_model_name`` and the ``product_name``
+    column held a synthetic label (``"BRAND/SUB MODEL QUALITY @ STORE"``) while
+    the stock model lived in ``provider_product_name``.
+
+    The current schema is:
+        product_name           -> stock model (e.g. "A02/A02S")
+        provider_product_name  -> order-sheet model (what the provider uses)
+        order_section          -> section in the order sheet
+        (no order_model_name column)
+
+    For each legacy GLASS row we copy ``provider_product_name`` into
+    ``product_name`` and ``order_model_name`` into ``provider_product_name``.
+    ACCESORIOS rows keep their values; the extra column is dropped.
+    """
+    def col(name):
+        try:
+            return old_headers.index(name)
+        except ValueError:
+            return -1
+
+    idx_pn = col('product_name')
+    idx_store = col('store')
+    idx_stype = col('stock_type')
+    idx_prov = col('provider')
+    idx_ppn = col('provider_product_name')
+    idx_brand = col('brand')
+    idx_sub = col('sub_line')
+    idx_quality = col('quality')
+    idx_section = col('order_section')
+    idx_omn = col('order_model_name')
+
+    def cell(row, i):
+        return row[i].strip() if 0 <= i < len(row) else ''
+
+    migrated = []
+    for row in old_rows:
+        if not row or not any(c.strip() for c in row if c is not None):
+            continue
+        stype = cell(row, idx_stype).upper()
+        product_name = cell(row, idx_pn)
+        provider_product_name = cell(row, idx_ppn)
+        order_model_name = cell(row, idx_omn) if idx_omn >= 0 else ''
+
+        if stype == 'GLASS':
+            stock_model = provider_product_name or product_name
+            order_model = order_model_name or provider_product_name
+            new_row = [
+                stock_model,
+                cell(row, idx_store),
+                'GLASS',
+                cell(row, idx_prov),
+                order_model,
+                cell(row, idx_brand),
+                cell(row, idx_sub),
+                cell(row, idx_quality),
+                cell(row, idx_section),
+            ]
+        else:
+            new_row = [
+                product_name,
+                cell(row, idx_store),
+                stype or 'ACCESORIOS',
+                cell(row, idx_prov),
+                provider_product_name or product_name,
+                cell(row, idx_brand),
+                cell(row, idx_sub),
+                cell(row, idx_quality),
+                cell(row, idx_section),
+            ]
+        migrated.append(new_row)
+    return migrated
 
 
 def _write_header_row(ws, headers):
@@ -269,71 +382,101 @@ def _col_letter(col_1based: int) -> str:
     return s
 
 
-def _write_glass_layout(wanted_ws, stock_values, blocks):
+def _write_glass_layout_with_stock(
+    wanted_ws,
+    stock_values,
+    stock_blocks,
+    existing_desired=None,
+    test_fill=False,
+):
+    """Render the wanted sheet with interleaved desired/stock columns.
+
+    For each stock block we emit seven columns::
+
+        BRAND | COMUN | stock | 5D | stock | OSC | stock
+
+    Each ``stock`` cell is ``=IMPORTRANGE($Q$1;"GLASS!<col><row>")`` using ``;``
+    as the list separator. Put the stock workbook URL in Q1 (see
+    ``WANTED_GLASS_STOCK_URL_CELL``).
+    """
+    existing_desired = existing_desired or {}
+
     n_rows = len(stock_values)
-    n_cols = max((len(r) for r in stock_values), default=0)
+    if n_rows == 0:
+        return
 
-    grid = [['' for _ in range(n_cols)] for _ in range(n_rows)]
+    block_width = 7
+    stock_model_cols = sorted({b['model_col'] for b in stock_blocks})
+    wanted_offset = {sc: i * block_width for i, sc in enumerate(stock_model_cols)}
+    total_cols = max(wanted_offset.values()) + block_width if wanted_offset else block_width
 
-    for block in blocks:
+    grid = [['' for _ in range(total_cols)] for _ in range(n_rows)]
+
+    source_tab = config.GLASS_TAB
+    url_ref = config.WANTED_GLASS_STOCK_URL_CELL
+
+    def _stock_formula(stock_row_1based: int, stock_col_1based: int) -> str:
+        col_a1 = _col_letter(stock_col_1based)
+        return (
+            f'=IMPORTRANGE({url_ref};"{source_tab}!{col_a1}{stock_row_1based}")'
+        )
+
+    qualities_order = ['COMUN', '5D', 'OSC']
+
+    for block in stock_blocks:
+        offset = wanted_offset[block['model_col']]
         hr = block['header_row']
-        if hr >= n_rows:
-            continue
-        for offset, col in enumerate((
-            block['model_col'],
-            block['comun_col'],
-            block['qty5d_col'],
-            block['qtyosc_col'],
-        )):
-            if col < n_cols and hr < len(stock_values) and col < len(stock_values[hr]):
-                grid[hr][col] = stock_values[hr][col]
+        brand = block['brand']
+
+        grid[hr][offset] = brand
+        for i, q in enumerate(qualities_order):
+            grid[hr][offset + 1 + i * 2] = q
+            grid[hr][offset + 2 + i * 2] = 'stock'
 
         for model, row_idx in zip(block['models'], block['model_rows']):
-            if row_idx < n_rows and block['model_col'] < n_cols:
-                grid[row_idx][block['model_col']] = model
+            grid[row_idx][offset] = model
 
-    if n_rows == 0 or n_cols == 0:
-        return
+            stock_row_1based = row_idx + 1
+            stock_row_api = stock_values[row_idx] if row_idx < len(stock_values) else []
 
-    end_cell = f"{_col_letter(n_cols)}{n_rows}"
-    wanted_ws.update(values=grid, range_name=f"A1:{end_cell}")
+            for i, q in enumerate(qualities_order):
+                desired_col = offset + 1 + i * 2
+                stock_col_idx = offset + 2 + i * 2
 
+                stock_quality_col_0based = block['qualities'][q]
+                stock_quality_col_1based = stock_quality_col_0based + 1
 
-def _fill_test_desired(wanted_ws, wanted_values, stock_values, blocks):
-    n_rows = max(len(wanted_values), len(stock_values))
-    n_cols = max(
-        max((len(r) for r in wanted_values), default=0),
-        max((len(r) for r in stock_values), default=0),
+                grid[row_idx][stock_col_idx] = _stock_formula(
+                    stock_row_1based, stock_quality_col_1based
+                )
+
+                qty_live = glass_utils._to_int(
+                    stock_row_api[stock_quality_col_0based]
+                    if stock_quality_col_0based < len(stock_row_api)
+                    else ''
+                )
+
+                preserved = existing_desired.get(
+                    (brand, block['sub_line'], model, q)
+                )
+
+                if q in config.GLASS_IGNORED_QUALITIES:
+                    if preserved is not None:
+                        grid[row_idx][desired_col] = preserved
+                    continue
+
+                if preserved is not None:
+                    grid[row_idx][desired_col] = preserved
+                elif test_fill:
+                    actual = qty_live
+                    grid[row_idx][desired_col] = actual + 2 if actual > 0 else 1
+
+    end_cell = f"{_col_letter(total_cols)}{n_rows}"
+    wanted_ws.update(
+        values=grid,
+        range_name=f"A1:{end_cell}",
+        value_input_option='USER_ENTERED',
     )
-
-    grid = [['' for _ in range(n_cols)] for _ in range(n_rows)]
-    for r_idx, row in enumerate(wanted_values):
-        for c_idx, val in enumerate(row):
-            grid[r_idx][c_idx] = val
-
-    for block in blocks:
-        for model, row_idx in zip(block['models'], block['model_rows']):
-            stock_row = stock_values[row_idx] if row_idx < len(stock_values) else []
-            for quality, col in (
-                ('5D', block['qty5d_col']),
-                ('OSC', block['qtyosc_col']),
-            ):
-                actual = 0
-                if col < len(stock_row):
-                    try:
-                        v = stock_row[col]
-                        actual = int(float(v)) if str(v).strip() else 0
-                    except (ValueError, TypeError):
-                        actual = 0
-                desired = actual + 2 if actual > 0 else 1
-                if col < n_cols and row_idx < n_rows:
-                    grid[row_idx][col] = desired
-
-    if n_rows == 0 or n_cols == 0:
-        return
-
-    end_cell = f"{_col_letter(n_cols)}{n_rows}"
-    wanted_ws.update(values=grid, range_name=f"A1:{end_cell}")
 
 
 def _match_order_model(order_index, section, stock_model):
