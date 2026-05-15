@@ -383,10 +383,13 @@ def _generate_orders_accesorios(missing, product_mapping, store, providers):
 
     default_provider = _default_provider_for_orders(providers)
 
+    default_order_tab = config.ORDER_ACCESORIOS_TAB
+
     mapping_specific: dict = {}
     mapping_generic: dict = {}
     for m in product_mapping:
-        if (m.get('stock_type') or '').upper() != 'ACCESORIOS':
+        st = (m.get('stock_type') or '').upper()
+        if st == 'GLASS':
             continue
         pn = (m.get('product_name') or '').strip()
         if not pn:
@@ -407,9 +410,11 @@ def _generate_orders_accesorios(missing, product_mapping, store, providers):
         m = lookup_mapping(product_name)
         provider = None
         provider_product_name = None
+        order_tab = default_order_tab
         if m is not None:
             provider = (m.get('provider') or '').strip()
             provider_product_name = (m.get('provider_product_name') or '').strip()
+            order_tab = (m.get('stock_type') or '').strip() or default_order_tab
             if not provider or not provider_product_name:
                 print(f"WARNING: mapping for {product_name!r} lacks provider or provider_product_name")
         if (not provider or not provider_product_name) and order_names:
@@ -417,11 +422,13 @@ def _generate_orders_accesorios(missing, product_mapping, store, providers):
             if auto_order:
                 provider_product_name = auto_order
                 provider = default_provider
+                order_tab = default_order_tab
                 print(f"  match {product_name!r} -> {auto_order!r} ({why})")
         if provider and provider_product_name:
             provider_products.setdefault(provider, []).append({
                 'provider_product_name': provider_product_name,
                 'quantity': data['missing'],
+                'order_tab': order_tab,
             })
             mapped_names.add(product_name)
 
@@ -559,94 +566,104 @@ def _resolve_acce_store_column_1based(header_row, store: str):
 
 
 def update_order_accesorios(provider_products, store, provider_order_ids: dict):
-    tab = config.ORDER_ACCESORIOS_TAB
-
     for provider, items in provider_products.items():
         spreadsheet_id = provider_order_ids.get(provider)
         if not spreadsheet_id:
             print(
                 f"WARNING: proveedor {provider!r} sin link en columna order; "
-                f"no se escribe pedido ACCE ({len(items)} líneas)",
+                f"no se escribe pedido ({len(items)} líneas)",
             )
             continue
 
-        ws = get_worksheet(spreadsheet_id, tab)
-        if ws is None:
-            print(f"Worksheet '{tab}' not found en order de {provider!r}")
-            continue
-
-        all_values = ws.get_all_values()
-        if not all_values:
-            print(f"Worksheet '{tab}' is empty ({provider!r})")
-            continue
-
-        header = all_values[0]
-        store_col = _resolve_acce_store_column_1based(header, store)
-        if store_col is None:
-            print(
-                f"Store '{store}' not found in ORDER_ACCESORIOS header ({provider!r}). "
-                f"Headers seen: {[str(h).strip() for h in header[:15] if str(h).strip()]}"
-            )
-            continue
-
-        product_rows = {}
-        for i, row in enumerate(all_values[1:], start=2):
-            if row and len(row) > 0 and row[0]:
-                product_rows[row[0].strip()] = i
-
-        qty_by_product: dict = {}
-        sources_by_product: dict = {}
+        # Group items by the order tab (stock_type from product_mapping)
+        items_by_tab: dict = {}
         for item in items:
-            provider_product_name = item['provider_product_name']
-            quantity = int(item['quantity'])
-            qty_by_product[provider_product_name] = (
-                qty_by_product.get(provider_product_name, 0) + quantity
-            )
-            sources_by_product.setdefault(provider_product_name, []).append(
-                f'{provider}:{quantity}'
-            )
+            tab = item.get('order_tab', config.ORDER_ACCESORIOS_TAB)
+            items_by_tab.setdefault(tab, []).append(item)
 
-        batch_updates = []
-        log_lines = []
-        not_found = []
-        for provider_product_name, total in qty_by_product.items():
-            row_num = product_rows.get(provider_product_name)
-            if not row_num:
-                not_found.append(provider_product_name)
-                continue
-            cell_a1 = f'{_col_letter(store_col)}{row_num}'
-            batch_updates.append({'range': cell_a1, 'values': [[total]]})
-            srcs = sources_by_product.get(provider_product_name, [])
-            if len(srcs) > 1:
-                log_lines.append(
-                    f"[{provider}] Updated {provider_product_name} -> {total} in {cell_a1} "
-                    f"(sum of {len(srcs)} lines: {', '.join(srcs)})"
-                )
-            else:
-                log_lines.append(
-                    f"[{provider}] Updated {provider_product_name} -> {total} in {cell_a1}"
-                )
+        for tab, tab_items in items_by_tab.items():
+            _write_order_tab(spreadsheet_id, tab, tab_items, provider, store)
 
-        if not_found:
-            for name in not_found:
-                print(f"[{provider}] Product '{name}' not found in ORDER_ACCESORIOS")
 
-        if batch_updates:
-            chunk_size = 100
-            for i in range(0, len(batch_updates), chunk_size):
-                chunk = batch_updates[i:i + chunk_size]
-                try:
-                    ws.batch_update(chunk, value_input_option='USER_ENTERED')
-                except TypeError:
-                    ws.batch_update(chunk)
+def _write_order_tab(spreadsheet_id, tab, items, provider, store):
+    """Write order quantities into a specific tab of the provider's order spreadsheet."""
+    ws = get_worksheet(spreadsheet_id, tab)
+    if ws is None:
+        print(f"Worksheet '{tab}' not found en order de {provider!r}")
+        return
 
-        for line in log_lines:
-            print(line)
+    all_values = ws.get_all_values()
+    if not all_values:
+        print(f"Worksheet '{tab}' is empty ({provider!r})")
+        return
 
+    header = all_values[0]
+    store_col = _resolve_acce_store_column_1based(header, store)
+    if store_col is None:
         print(
-            f"Updated ORDER_ACCESORIOS provider={provider!r} store={store!r} "
-            f"({len(batch_updates)} cells)"
+            f"Store '{store}' not found in order tab '{tab}' header ({provider!r}). "
+            f"Headers seen: {[str(h).strip() for h in header[:15] if str(h).strip()]}"
         )
+        return
+
+    product_rows = {}
+    for i, row in enumerate(all_values[1:], start=2):
+        if row and len(row) > 0 and row[0]:
+            product_rows[row[0].strip()] = i
+
+    qty_by_product: dict = {}
+    sources_by_product: dict = {}
+    for item in items:
+        provider_product_name = item['provider_product_name']
+        quantity = int(item['quantity'])
+        qty_by_product[provider_product_name] = (
+            qty_by_product.get(provider_product_name, 0) + quantity
+        )
+        sources_by_product.setdefault(provider_product_name, []).append(
+            f'{provider}:{quantity}'
+        )
+
+    batch_updates = []
+    log_lines = []
+    not_found = []
+    for provider_product_name, total in qty_by_product.items():
+        row_num = product_rows.get(provider_product_name)
+        if not row_num:
+            not_found.append(provider_product_name)
+            continue
+        cell_a1 = f'{_col_letter(store_col)}{row_num}'
+        batch_updates.append({'range': cell_a1, 'values': [[total]]})
+        srcs = sources_by_product.get(provider_product_name, [])
+        if len(srcs) > 1:
+            log_lines.append(
+                f"[{provider}] Updated {provider_product_name} -> {total} in {cell_a1} "
+                f"(sum of {len(srcs)} lines: {', '.join(srcs)})"
+            )
+        else:
+            log_lines.append(
+                f"[{provider}] Updated {provider_product_name} -> {total} in {cell_a1}"
+            )
+
+    if not_found:
+        for name in not_found:
+            print(f"[{provider}] Product '{name}' not found in order tab '{tab}'")
+
+    if batch_updates:
+        chunk_size = 100
+        for i in range(0, len(batch_updates), chunk_size):
+            chunk = batch_updates[i:i + chunk_size]
+            try:
+                ws.batch_update(chunk, value_input_option='USER_ENTERED')
+            except TypeError:
+                ws.batch_update(chunk)
+
+    for line in log_lines:
+        print(line)
+
+    print(
+        f"Updated order tab='{tab}' provider={provider!r} store={store!r} "
+        f"({len(batch_updates)} cells)"
+    )
 
 
 def update_order_glass(items, store, spreadsheet_id=None):
