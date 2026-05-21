@@ -417,7 +417,7 @@ def _generate_orders_accesorios(missing, product_mapping, store, providers):
             order_tab = (m.get('stock_type') or '').strip() or default_order_tab
             if not provider or not provider_product_name:
                 print(f"WARNING: mapping for {product_name!r} lacks provider or provider_product_name")
-        if (not provider or not provider_product_name) and order_names:
+        if m is None and (not provider or not provider_product_name) and order_names:
             auto_order, why = acc_match.match_wanted_to_order(product_name, order_names)
             if auto_order:
                 provider_product_name = auto_order
