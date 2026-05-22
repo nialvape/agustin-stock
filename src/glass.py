@@ -230,13 +230,13 @@ def parse_glass_values(
 
 
 def parse_glass_stock(spreadsheet_id: str) -> Dict[GlassKey, int]:
-    from .google_sheets import get_worksheet
+    from .google_sheets import get_worksheet, retry_api
 
     try:
         ws = get_worksheet(spreadsheet_id, config.GLASS_TAB)
         if ws is None:
             return {}
-        values = ws.get_all_values()
+        values = retry_api(lambda: ws.get_all_values(), 'glass stock')
     except Exception as e:
         print(f"Error parsing glass stock: {e}")
         return {}
@@ -249,13 +249,13 @@ def parse_glass_wanted(spreadsheet_id: str) -> Tuple[Dict[GlassKey, int], bool]:
 
     Returns ({(brand, sub_line, model, quality): faltante_qty}, uses_faltante_layout).
     """
-    from .google_sheets import get_worksheet
+    from .google_sheets import get_worksheet, retry_api
 
     try:
         ws = get_worksheet(spreadsheet_id, config.WANTED_GLASS_TAB)
         if ws is None:
             return {}, False
-        values = ws.get_all_values()
+        values = retry_api(lambda: ws.get_all_values(), 'glass wanted')
     except Exception as e:
         print(f"Error parsing glass wanted: {e}")
         return {}, False

@@ -1,12 +1,22 @@
 import os
+import time
 import gspread
 from google.oauth2 import service_account
 from gspread import Worksheet
 
 SCOPES = ['https://www.googleapis.com/auth/spreadsheets']
 
+_RETRY_DELAYS = [5, 10, 20]  # segundos de espera entre reintentos (429 / 503)
+
+_cached_client = None
+_cached_sheets: dict = {}  # spreadsheet_id -> Spreadsheet
+
 
 def get_client():
+    global _cached_client
+    if _cached_client is not None:
+        return _cached_client
+
     creds_path = os.environ.get('GOOGLE_APPLICATION_CREDENTIALS')
     if not creds_path:
         creds_path = os.environ.get('GOOGLE_CREDS_PATH')
@@ -24,13 +34,54 @@ def get_client():
             creds_path, scopes=SCOPES
         )
     
-    return gspread.Client(credentials)
+    _cached_client = gspread.Client(credentials)
+    return _cached_client
+
+
+def _is_rate_limit_error(exc: Exception) -> bool:
+    code = getattr(exc, 'response', None)
+    if code is not None:
+        status = getattr(code, 'status_code', None)
+        if status in (429, 503):
+            return True
+    if hasattr(exc, 'args') and exc.args:
+        msg = str(exc.args[0]) if exc.args else ''
+        if '429' in msg or '503' in msg:
+            return True
+    return False
+
+
+def _retry(fn, label: str = ''):
+    """Ejecuta *fn()* con reintentos ante 429 / 503."""
+    last_exc = None
+    for attempt in range(1 + len(_RETRY_DELAYS)):
+        try:
+            return fn()
+        except Exception as e:
+            last_exc = e
+            if _is_rate_limit_error(e) and attempt < len(_RETRY_DELAYS):
+                delay = _RETRY_DELAYS[attempt]
+                tag = f" ({label})" if label else ''
+                print(f"  [rate-limit] esperando {delay}s antes de reintentar{tag}")
+                time.sleep(delay)
+                continue
+            raise
+    raise last_exc  # nunca debería llegar acá
+
+
+# Alias público para que otros módulos puedan usar retry en sus llamadas gspread.
+retry_api = _retry
 
 
 def get_sheet(spreadsheet_id: str):
+    if spreadsheet_id in _cached_sheets:
+        return _cached_sheets[spreadsheet_id]
+
     try:
         client = get_client()
-        return client.open_by_key(spreadsheet_id)
+        sheet = _retry(lambda: client.open_by_key(spreadsheet_id), spreadsheet_id[:12])
+        _cached_sheets[spreadsheet_id] = sheet
+        return sheet
     except Exception as e:
         print(f"Error opening spreadsheet {spreadsheet_id}: {e}")
         return None
@@ -42,10 +93,11 @@ def get_worksheet(spreadsheet_id: str, sheet_name: str):
         if sheet is None:
             return None
         try:
-            return sheet.worksheet(sheet_name)
+            return _retry(lambda: sheet.worksheet(sheet_name), sheet_name)
         except gspread.exceptions.WorksheetNotFound:
             pass
-        for ws in sheet.worksheets():
+        all_ws = _retry(lambda: sheet.worksheets(), sheet_name)
+        for ws in all_ws:
             if sheet_name.strip().lower() in ws.title.strip().lower():
                 return ws
         return None

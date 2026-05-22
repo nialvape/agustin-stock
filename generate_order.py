@@ -5,7 +5,7 @@ from collections import defaultdict
 from dotenv import load_dotenv
 load_dotenv()
 
-from src.google_sheets import get_worksheet
+from src.google_sheets import get_worksheet, retry_api
 from src import glass as glass_utils
 from src import accesorios_order_match as acc_match
 import src.sheet_config as config
@@ -37,7 +37,7 @@ def load_product_mapping():
         if ws is None:
             return product_mapping
 
-        values = ws.get_all_values()
+        values = retry_api(lambda: ws.get_all_values(), 'product_mapping')
         if not values or len(values) < 2:
             return product_mapping
 
@@ -101,7 +101,7 @@ def parse_accessories_stock(spreadsheet_id):
             print(f"Worksheet '{stock_type}' not found")
             return products
 
-        values = ws.get_all_values()
+        values = retry_api(lambda: ws.get_all_values(), 'accesorios stock')
 
         for row in values[1:]:
             product_a = row[0] if len(row) > 0 else None
@@ -159,7 +159,7 @@ def load_wanted_accesorios(store, wanted_spreadsheet_id=None):
         return {}
 
     try:
-        values = ws.get_all_values()
+        values = retry_api(lambda: ws.get_all_values(), 'wanted accesorios')
     except Exception as e:
         print(f"Error reading wanted file: {e}")
         return {}
@@ -592,7 +592,7 @@ def _write_order_tab(spreadsheet_id, tab, items, provider, store):
         print(f"Worksheet '{tab}' not found en order de {provider!r}")
         return
 
-    all_values = ws.get_all_values()
+    all_values = retry_api(lambda: ws.get_all_values(), f'order {tab}')
     if not all_values:
         print(f"Worksheet '{tab}' is empty ({provider!r})")
         return
@@ -653,9 +653,9 @@ def _write_order_tab(spreadsheet_id, tab, items, provider, store):
         for i in range(0, len(batch_updates), chunk_size):
             chunk = batch_updates[i:i + chunk_size]
             try:
-                ws.batch_update(chunk, value_input_option='USER_ENTERED')
+                retry_api(lambda c=chunk: ws.batch_update(c, value_input_option='USER_ENTERED'), f'write {tab}')
             except TypeError:
-                ws.batch_update(chunk)
+                retry_api(lambda c=chunk: ws.batch_update(c), f'write {tab}')
 
     for line in log_lines:
         print(line)
@@ -682,7 +682,7 @@ def update_order_glass(items, store, spreadsheet_id=None):
         return
 
     try:
-        values = ws.get_all_values()
+        values = retry_api(lambda: ws.get_all_values(), f'order GLASS {store}')
     except Exception as e:
         print(f"Error reading order tab '{store}': {e}")
         return
@@ -745,9 +745,9 @@ def update_order_glass(items, store, spreadsheet_id=None):
 
     if batch_updates:
         try:
-            ws.batch_update(batch_updates, value_input_option='USER_ENTERED')
+            retry_api(lambda: ws.batch_update(batch_updates, value_input_option='USER_ENTERED'), f'write GLASS {store}')
         except TypeError:
-            ws.batch_update(batch_updates)
+            retry_api(lambda: ws.batch_update(batch_updates), f'write GLASS {store}')
 
     print(
         f"  ORDER_GLASS '{store}': {written} celdas escritas, "

@@ -95,7 +95,7 @@ def load_stores_rows():
     Column A = nombre del local (p. ej. NAME en fila 1), B = GLASS, C = ACCESORIOS.
     Optional header row if la celda A parece título (NAME, store, local, etc.).
     """
-    from .google_sheets import get_worksheet
+    from .google_sheets import get_worksheet, retry_api
 
     cid = get_config_table_id()
     if not cid:
@@ -104,7 +104,7 @@ def load_stores_rows():
     if ws is None:
         return []
     try:
-        values = ws.get_all_values()
+        values = retry_api(lambda: ws.get_all_values(), 'stores')
     except Exception:
         return []
     if not values:
@@ -174,7 +174,7 @@ def load_providers_from_config():
 
     Returns dict ``name -> {'code': str, 'order_spreadsheet_id': str}``.
     """
-    from .google_sheets import get_worksheet
+    from .google_sheets import get_worksheet, retry_api
 
     cid = get_config_table_id()
     if not cid:
@@ -183,7 +183,7 @@ def load_providers_from_config():
     if ws is None:
         return {}
     try:
-        values = ws.get_all_values()
+        values = retry_api(lambda: ws.get_all_values(), 'providers')
     except Exception:
         return {}
     if not values:

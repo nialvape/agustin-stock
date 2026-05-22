@@ -294,12 +294,12 @@ def match_wanted_to_order(
 
 
 def load_order_accesorios_product_names(spreadsheet_id: str, tab: str) -> List[str]:
-    from .google_sheets import get_worksheet
+    from .google_sheets import get_worksheet, retry_api
 
     ws = get_worksheet(spreadsheet_id, tab)
     if ws is None:
         return []
-    return parse_order_column_a_products(ws.get_all_values())
+    return parse_order_column_a_products(retry_api(lambda: ws.get_all_values(), f'order {tab}'))
 
 
 def build_wanted_to_order_map(
