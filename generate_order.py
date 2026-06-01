@@ -672,10 +672,6 @@ def update_order_glass(items, store, spreadsheet_id=None):
         print("ORDER_GLASS: sin spreadsheet (columna order en providers ni ORDER_GLASS_TABLE)")
         return
 
-    if store in config.ORDER_GLASS_LEGACY_TABS:
-        print(f"Skip legacy tab '{store}'")
-        return
-
     ws = get_worksheet(spreadsheet_id, store)
     if ws is None:
         print(f"Store '{store}' not found in ORDER_GLASS")

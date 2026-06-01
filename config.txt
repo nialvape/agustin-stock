@@ -6,7 +6,7 @@
 #
 # GLASS / ACCESORIOS: si | no  (también 1 | 0, true | false)
 
-LOCALES=TODOS
+LOCALES=CARRE
 
 GLASS=si
-ACCESORIOS=si
+ACCESORIOS=no

@@ -289,14 +289,12 @@ def index_order_sheet(values: List[List[str]]) -> Dict[Tuple[str, str], Tuple[in
     """Build an index of an order sheet tab.
 
     Returns dict mapping (section, normalized_model) -> (row_1based, qty_col_1based).
-    Legacy sections (IPHONE 9D, REDMI 9D, …) are skipped.
     """
     index: Dict[Tuple[str, str], Tuple[int, int]] = {}
     if not values:
         return index
 
     section_match: Dict[str, str] = {s.upper(): s for s in config.ORDER_GLASS_SECTIONS}
-    legacy_upper = {s.upper() for s in config.ORDER_GLASS_LEGACY_SECTIONS}
 
     _section_cache: Dict[int, List[Tuple[int, Optional[str]]]] = {}
 
@@ -320,9 +318,6 @@ def index_order_sheet(values: List[List[str]]) -> Dict[Tuple[str, str], Tuple[in
                         break
             if matched is not None:
                 events.append((r_idx, matched))
-                continue
-            if cell_u in legacy_upper or any(lg in cell_u for lg in legacy_upper):
-                events.append((r_idx, None))
         _section_cache[section_col_1based] = events
         return events
 
@@ -351,8 +346,6 @@ def index_order_sheet(values: List[List[str]]) -> Dict[Tuple[str, str], Tuple[in
                 continue
             cell_u = cell.upper()
             if cell_u in section_match or any(h in cell_u for h in section_match):
-                continue
-            if cell_u in legacy_upper or any(lg in cell_u for lg in legacy_upper):
                 continue
             if cell_u in skip_upper or cell_u in config.GLASS_BRANDS:
                 continue
